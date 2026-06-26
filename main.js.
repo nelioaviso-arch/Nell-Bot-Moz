@@ -1,0 +1,206 @@
+import ws from 'ws'
+import moment from 'moment'
+import chalk from 'chalk'
+import fs from 'fs'
+import path from 'path'
+import gradient from 'gradient-string'
+
+global.commands = global.commands || new Map()
+global.cmdsExecute = global.cmdsExecute || []
+
+const prefixes = ['.', '!', '#', '/']
+
+const cache = new Map()
+
+export function getCachedMeta(id) {
+    return cache.get(id)
+}
+
+export function setCachedMeta(id, data) {
+    cache.set(id, data)
+}
+
+export default async (sock, msg) => {
+    try {
+        if (!msg) return
+
+        const sender = msg.sender || msg.key.participant
+        const from = msg.chat || msg.key.remoteJid
+
+        const body =
+            msg.body ||
+            msg.text ||
+            msg.message?.conversation ||
+            ''
+
+        const pushname =
+            msg.pushName ||
+            'Sin nombre'
+
+        const isGroup = from.endsWith('@g.us')
+
+        let groupMetadata = null
+        let participants = []
+        let admins = []
+
+        if (isGroup) {
+            groupMetadata = getCachedMeta(from)
+
+            if (!groupMetadata) {
+                groupMetadata =
+                    await sock.groupMetadata(from)
+                        .catch(() => null)
+
+                if (groupMetadata)
+                    setCachedMeta(from, groupMetadata)
+            }
+
+            participants =
+                groupMetadata?.participants || []
+
+            admins = participants
+                .filter(
+                    p =>
+                        p.admin === 'admin' ||
+                        p.admin === 'superadmin'
+                )
+                .map(p => p.id)
+        }
+
+        const isAdmin =
+            admins.includes(sender)
+
+        const botNumber =
+            sock.user.id.split(':')[0] +
+            '@s.whatsapp.net'
+
+        const isBotAdmin =
+            admins.includes(botNumber)
+
+        let usedPrefix = null
+
+        for (const p of prefixes) {
+            if (body.startsWith(p)) {
+                usedPrefix = p
+                break
+            }
+        }
+
+        const isCmd = !!usedPrefix
+
+        if (!isCmd) {
+            for (const plugin of global.cmdsExecute) {
+                if (typeof plugin.before === 'function') {
+                    await plugin.before.call(sock, {
+                        sock,
+                        msg,
+                        sender,
+                        from
+                    })
+                }
+            }
+            return
+        }
+
+        const args =
+            body.slice(usedPrefix.length)
+                .trim()
+                .split(/ +/)
+
+        const command =
+            args.shift().toLowerCase()
+
+        console.log(
+            gradient.pastel(
+                `[ YUKI ] ${command}`
+            )
+        )
+
+        if (global.commands.has(command)) {
+
+            const cmd =
+                global.commands.get(command)
+
+            if (cmd.owner &&
+                sender !== global.owner) {
+
+                return sock.sendMessage(
+                    from,
+                    {
+                        text:
+                        'Este comando é apenas para o proprietário.'
+                    }
+                )
+            }
+
+            if (cmd.group &&
+                !isGroup) {
+
+                return sock.sendMessage(
+                    from,
+                    {
+                        text:
+                        'Este comando só funciona em grupos.'
+                    }
+                )
+            }
+
+            if (cmd.admin &&
+                !isAdmin) {
+
+                return sock.sendMessage(
+                    from,
+                    {
+                        text:
+                        'Somente administradores.'
+                    }
+                )
+            }
+
+            if (cmd.botAdmin &&
+                !isBotAdmin) {
+
+                return sock.sendMessage(
+                    from,
+                    {
+                        text:
+                        'O bot precisa ser administrador.'
+                    }
+                )
+            }
+
+            await cmd.run({
+                sock,
+                msg,
+                command,
+                args,
+                sender,
+                from,
+                pushname,
+                isAdmin,
+                isBotAdmin,
+                participants,
+                groupMetadata
+            })
+
+            return
+        }
+
+        await sock.sendMessage(
+            from,
+            {
+                text:
+                `El comando "${command}" no existe.`
+            }
+        )
+
+    } catch (err) {
+
+        console.log(
+            chalk.red(
+                '[ERROR]',
+                err
+            )
+        )
+    }
+}
